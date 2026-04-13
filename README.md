@@ -1,34 +1,49 @@
 # TaskFlow
 
-Backend for a task management system — register, login, manage projects and tasks with role-based permissions.
+A RESTful backend for a task management system built with Go. Supports user registration and authentication, project management, and task tracking with role-based permissions.
 
-## Stack
+## Tech Stack
 
-- Go 1.22 with chi router
-- PostgreSQL 16
-- JWT auth (golang-jwt/v5), bcrypt cost 12
-- golang-migrate for schema migrations
-- Structured logging via `log/slog`
-- Docker multi-stage build
+- **Go 1.22** with [chi](https://github.com/go-chi/chi) router
+- **PostgreSQL 16** with UUID primary keys and enum types
+- **JWT authentication** (golang-jwt/v5) with bcrypt password hashing (cost 12)
+- **golang-migrate** for versioned schema migrations
+- **Structured logging** via `log/slog` (JSON output)
+- **Docker** multi-stage build with Compose orchestration
 
-## Architecture
+## Project Structure
 
-Went with a standard `cmd/` + `internal/` layout. Handlers are split by domain (auth, project, task) — nothing fancy, just keeps things easy to navigate.
+```
+backend/
+├── cmd/server/main.go          # Entry point, routing, graceful shutdown
+├── internal/
+│   ├── db/
+│   │   ├── migrate.go          # Migration runner
+│   │   └── seed.go             # Seed data (test user, sample project/tasks)
+│   ├── handler/
+│   │   ├── handler.go          # Shared handler struct, helpers
+│   │   ├── auth.go             # Register, Login, JWT generation
+│   │   ├── project.go          # Project CRUD
+│   │   ├── task.go             # Task CRUD + project stats
+│   │   └── auth_test.go        # Integration tests for auth flows
+│   ├── middleware/
+│   │   └── auth.go             # JWT validation, JSON content-type
+│   └── model/
+│       └── model.go            # Domain types, request/response structs
+├── migrations/                 # SQL migration files (up/down)
+├── Dockerfile                  # Multi-stage build
+├── go.mod
+└── go.sum
+```
 
-I'm using raw `database/sql` instead of an ORM. For something this size, an ORM adds more complexity than it removes. I want to see exactly what queries are running.
+## Design Decisions
 
-For PATCH endpoints, I use `COALESCE($1, column)` so only the fields you send get updated. Downside: you can't explicitly null out a field. Acceptable tradeoff here.
+- **Raw `database/sql` over an ORM.** At this scale, an ORM adds more abstraction than value. Parameterized queries throughout for SQL injection prevention.
+- **`COALESCE` for partial updates.** PATCH endpoints use `COALESCE($1, column)` so only provided fields are updated. Tradeoff: fields cannot be explicitly set to null.
+- **Added `creator_id` to tasks.** Not in the original spec, but necessary to enforce "only the task creator or project owner can delete/update a task."
+- **Two queries for stats endpoint.** Could be combined into one, but separate queries are more readable at this scale.
 
-I added a `creator_id` to tasks that wasn't in the original spec — needed it to properly check "only the task creator or project owner can delete a task."
-
-### Things I skipped intentionally
-
-- No rate limiting (would definitely add for prod, especially on `/auth/*`)
-- Single JWT with 24h expiry, no refresh tokens — keeps it simple but not ideal long-term
-- Any authenticated user can create tasks in any project they can see. A real app would need project membership.
-- The stats endpoint runs two queries. Could be one, but readability > micro-optimization at this scale.
-
-## Running Locally
+## Getting Started
 
 ```bash
 git clone <repo-url>
@@ -37,29 +52,30 @@ cp .env.example .env
 docker compose up --build
 ```
 
-API runs at `http://localhost:8080`. Migrations and seed data run automatically on startup.
+The API starts at `http://localhost:8080`. Migrations and seed data run automatically on startup.
 
-## Test Credentials
+### Test Credentials
 
 Created by the seed script on first boot:
-```
-Email:    test@example.com
-Password: password123
-```
 
-## API
+| Email | Password |
+|-------|----------|
+| `test@example.com` | `password123` |
 
-Postman collection in `postman/TaskFlow.postman_collection.json` — import it, hit Login first, token auto-fills everywhere else.
+## API Reference
 
-### Auth
+A Postman collection is included at `postman/TaskFlow.postman_collection.json`. Import it, run the Login request first, and the token auto-populates for all other requests.
 
-| Method | Endpoint | What it does |
+### Authentication
+
+| Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/auth/register` | Create account |
-| POST | `/auth/login` | Get JWT token |
+| POST | `/auth/register` | Create a new account |
+| POST | `/auth/login` | Authenticate and receive a JWT |
+
+**Example:**
 
 ```bash
-# login
 curl -X POST http://localhost:8080/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"test@example.com","password":"password123"}'
@@ -67,44 +83,73 @@ curl -X POST http://localhost:8080/auth/login \
 
 ### Projects
 
-All require `Authorization: Bearer <token>`.
+All endpoints require `Authorization: Bearer <token>`.
 
-| Method | Endpoint | What it does |
+| Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/projects` | Your projects (paginated) |
-| POST | `/projects` | New project |
-| GET | `/projects/:id` | Project + its tasks |
-| PATCH | `/projects/:id` | Edit (owner only) |
-| DELETE | `/projects/:id` | Delete cascade (owner only) |
-| GET | `/projects/:id/stats` | Task counts by status/assignee |
+| GET | `/projects` | List your projects (paginated) |
+| POST | `/projects` | Create a new project |
+| GET | `/projects/:id` | Get project details with tasks |
+| PATCH | `/projects/:id` | Update project (owner only) |
+| DELETE | `/projects/:id` | Delete project and its tasks (owner only) |
+| GET | `/projects/:id/stats` | Task breakdown by status and assignee |
 
 ### Tasks
 
-| Method | Endpoint | What it does |
+| Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/projects/:id/tasks` | List (filterable, paginated) |
-| POST | `/projects/:id/tasks` | New task |
-| PATCH | `/tasks/:id` | Update fields |
-| DELETE | `/tasks/:id` | Delete (creator or project owner) |
+| GET | `/projects/:id/tasks` | List tasks (filterable, paginated) |
+| POST | `/projects/:id/tasks` | Create a task in a project |
+| PATCH | `/tasks/:id` | Update task (creator or project owner) |
+| DELETE | `/tasks/:id` | Delete task (creator or project owner) |
 
-Filters: `?status=todo|in_progress|done`, `?assignee=<uuid>`
-Pagination: `?page=1&limit=20`
+**Query Parameters:**
+- Filter: `?status=todo|in_progress|done`, `?assignee=<uuid>`
+- Pagination: `?page=1&limit=20` (default limit: 20, max: 100)
 
-### Errors
+### Error Responses
+
+All errors return a consistent JSON structure:
 
 ```json
-{"error":"validation failed","fields":{"email":"is required"}}  // 400
-{"error":"unauthorized"}                                         // 401
-{"error":"forbidden"}                                            // 403
-{"error":"not found"}                                            // 404
+{"error": "validation failed", "fields": {"email": "is required"}}
 ```
 
-## Bonus stuff
+| Status | Meaning |
+|--------|---------|
+| 400 | Validation error (with field details) |
+| 401 | Missing or invalid authentication |
+| 403 | Insufficient permissions |
+| 404 | Resource not found |
 
-- Pagination with total counts on list endpoints
-- `/projects/:id/stats` for task breakdown
-- Integration tests covering auth flows (register, login, validation, 401 on protected routes)
+## Authorization Model
 
-## What I'd improve
+- **Projects:** Only the project owner can update or delete a project.
+- **Tasks:** Only the task creator or the project owner can update or delete a task.
+- **Visibility:** Users see projects they own or are assigned tasks in.
 
-Refresh token rotation is the big one — a single long-lived JWT isn't great. I'd also add rate limiting on auth endpoints, wire the chi request ID into all log lines, and set up proper connection pool tuning (`MaxOpenConns`, etc). An `/health` endpoint for container orchestration would be easy to add. And honestly, project-level membership/invites would make the permissions model way more useful.
+## Testing
+
+Integration tests cover auth flows (registration, login, validation, protected route access):
+
+```bash
+TEST_DATABASE_URL="postgres://user:pass@localhost:5432/testdb?sslmode=disable" \
+  go test ./internal/handler/ -v
+```
+
+## Additional Features
+
+- Pagination with total counts on all list endpoints
+- `/projects/:id/stats` endpoint for task distribution by status and assignee
+- Graceful server shutdown with signal handling
+- Database connection retry on startup (up to 10 attempts)
+- Optimized Docker layer caching for faster rebuilds
+
+## Future Improvements
+
+- Refresh token rotation (current: single JWT with 24h expiry)
+- Rate limiting on authentication endpoints
+- Project membership and invite system
+- Connection pool tuning (`MaxOpenConns`, `MaxIdleConns`)
+- `/health` endpoint for container orchestration
+- Request ID propagation in all log lines
